@@ -18,7 +18,6 @@ raw_channel_id = os.environ.get('KILLBOARD_CHANNEL_ID')
 KILLBOARD_CHANNEL_ID = int(raw_channel_id) if raw_channel_id else None
 
 # --- FLASK WEB SERVER SETUP (for Gunicorn) ---
-# Gunicorn will look for this 'app' variable and run it.
 app = Flask(__name__)
 @app.route('/')
 def home():
@@ -54,12 +53,13 @@ async def on_ready():
         print(f"FATAL: Database connection failed: {e}")
         db = None
 
-# ... (All your other bot events and commands go here, unchanged) ...
 @tasks.loop(seconds=60)
 async def check_player_events():
-    if not db or not KILLBOARD_CHANNEL_ID: return
+    # FIXED: Changed 'if not db' to 'if db is None'
+    if db is None or not KILLBOARD_CHANNEL_ID: return
     channel = bot.get_channel(KILLBOARD_CHANNEL_ID)
     if not channel: return
+    
     players_collection = db['registered_players']
     events_collection = db['processed_events']
     for player_doc in players_collection.find():
@@ -85,17 +85,20 @@ async def check_player_events():
 async def before_check_player_events():
     await bot.wait_until_ready()
 
+# --- BOT COMMANDS (Now with added DB connection checks) ---
 @bot.command(name='register')
 async def register(ctx, *, player_name: str):
-    if not db: return await ctx.send("❌ Command failed: The database is not connected.")
+    # FIXED: Changed 'if not db' to 'if db is None'
+    if db is None: return await ctx.send("❌ Command failed: The database is not connected.")
     player_data = search_player(player_name)
     if not player_data: return await ctx.send(f"❌ Could not find a player named `{player_name}`.")
     db['registered_players'].update_one({'_id': ctx.author.id}, {'$set': {'player_data': player_data}}, upsert=True)
-    await ctx.send(f"✅ **Success!** `{player_data['Name']}` is now being tracked.")
+    await ctx.send(f"✅ **Success!** `{player_name}` is now being tracked.")
 
 @bot.command(name='unregister')
 async def unregister(ctx):
-    if not db: return await ctx.send("❌ Command failed: The database is not connected.")
+    # FIXED: Changed 'if not db' to 'if db is None'
+    if db is None: return await ctx.send("❌ Command failed: The database is not connected.")
     result = db['registered_players'].delete_one({'_id': ctx.author.id})
     if result.deleted_count > 0: await ctx.send("✅ **Removed!** You will no longer be tracked.")
     else: await ctx.send("❌ You are not currently registered.")
@@ -137,7 +140,5 @@ def run_bot():
 
 # --- SCRIPT EXECUTION STARTS HERE WHEN GUNICORN IMPORTS THE FILE ---
 print("INFO: Script is being imported by Gunicorn, starting bot thread...")
-# We start the bot in a separate thread.
-# Gunicorn will run the 'app' object, and the bot will run in this thread.
 bot_thread = Thread(target=run_bot)
 bot_thread.start()
