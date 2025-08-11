@@ -30,8 +30,10 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 db = None # Initialize db as None
 
 # --- API HELPER FUNCTIONS ---
+# Using the official EU API for primary player/event data
 OFFICIAL_API_BASE_URL = 'https://gameinfo-ams.albiononline.com/api/gameinfo'
-WRAPPER_API_BASE_URL = 'https://www.tools4albion.com/api/gameinfo'
+# Using the new, reliable data project API for items and prices
+DATA_API_BASE_URL = 'https://www.albion-online-data.com/api/v2/stats'
 
 def search_player(name):
     """Searches for a player on the official EU server API."""
@@ -45,21 +47,26 @@ def search_player(name):
 
 def get_player_events(player_id):
     """Gets recent kill/death events for a player from the official EU server API."""
-    response = requests.get(f"{OFFICIAL_API_BASE_URL}/events/player/{player_id}/kills")
+    response = requests.get(f"{OFFICIAL_API_BASE_URL}/players/{player_id}/kills")
     if response.status_code == 200:
         return response.json()
     return []
 
 def search_item(name):
-    """Searches for an item using the wrapper API."""
-    response = requests.get(f"{WRAPPER_API_BASE_URL}/search?search={name}")
+    """Searches for an item using the new data project API."""
+    response = requests.get(f"{DATA_API_BASE_URL}/search/{name}")
     if response.status_code == 200 and response.json().get('items'):
-        return response.json()['items'][0]
+        # Find the best match from the search results
+        for item in response.json()['items']:
+            if item.get('LocalizedName', '').lower() == name.lower():
+                return item # Return exact match
+        return response.json()['items'][0] # Fallback to first result
     return None
 
-def get_item_prices(item_id):
-    """Gets item prices using the wrapper API."""
-    response = requests.get(f"{WRAPPER_API_BASE_URL}/prices/{item_id}")
+def get_item_prices(item_unique_name):
+    """Gets item prices using the new data project API."""
+    # The new API uses the item's UniqueName (e.g., T4_BOW_BADON)
+    response = requests.get(f"{DATA_API_BASE_URL}/prices/{item_unique_name}")
     if response.status_code == 200:
         return response.json()
     return None
@@ -104,35 +111,12 @@ async def check_player_events():
         for event in events:
             event_id = str(event['EventId'])
             if events_collection.find_one({'_id': event_id}) is None:
-                # --- NEW: Enhanced Killboard Embed Generation ---
                 is_kill = event['Killer']['Id'] == player_id
                 title = f"DEATH: {player_name} was killed!" if not is_kill else f"KILL: {player_name} got a kill!"
                 color = discord.Color.red() if not is_kill else discord.Color.green()
                 
-                # Create the URL to the official killboard
-                killboard_url = f"https://albiononline.com/en/killboard/kill/{event_id}"
+                embed = discord.Embed(title=title, description=f"**{event['Killer']['Name']}** defeated **{event['Victim']['Name']}**", color=color)
                 
-                embed = discord.Embed(title=title, url=killboard_url, color=color)
-                
-                # Killer Info
-                killer_guild = event['Killer'].get('GuildName', 'No Guild')
-                killer_alliance = f"[{event['Killer'].get('AllianceName', 'No Alliance')}]"
-                killer_info = f"**{event['Killer']['Name']}**\n{killer_guild}\n{killer_alliance}"
-                
-                # Victim Info
-                victim_guild = event['Victim'].get('GuildName', 'No Guild')
-                victim_alliance = f"[{event['Victim'].get('AllianceName', 'No Alliance')}]"
-                victim_info = f"**{event['Victim']['Name']}**\n{victim_guild}\n{victim_alliance}"
-                
-                embed.add_field(name="Killer", value=killer_info, inline=True)
-                embed.add_field(name="Victim", value=victim_info, inline=True)
-                
-                # Participants Info
-                participants = [p['Name'] for p in event.get('Participants', []) if p['Id'] != event['Killer']['Id']]
-                if participants:
-                    embed.add_field(name="Assisted By", value="\n".join(participants), inline=False)
-                
-                # Set the image using the tools4albion renderer URL
                 kill_image_url = f"https://www.tools4albion.com/renderer/kill/{event_id}.png"
                 embed.set_image(url=kill_image_url)
                 
@@ -165,17 +149,37 @@ async def unregister(ctx):
 async def price(ctx, *, item_name: str):
     await ctx.send(f"🔍 Searching for `{item_name}`...")
     item_data = search_item(item_name)
-    if not item_data: return await ctx.send(f"❌ Could not find an item named `{item_name}`.")
-    item_id = item_data['ItemId']
-    found_name = item_data['Name']
+    
+    if not item_data or 'UniqueName' not in item_data:
+        return await ctx.send(f"❌ Could not find an item named `{item_name}`.")
+        
+    item_id = item_data['UniqueName']
+    found_name = item_data.get('LocalizedName', item_id)
+    
     prices = get_item_prices(item_id)
-    if not prices: return await ctx.send(f"Could not fetch price data for `{found_name}`.")
+    if not prices:
+        return await ctx.send(f"Could not fetch price data for `{found_name}`.")
+
     embed = discord.Embed(title=f"Price Check: {found_name}", color=discord.Color.blue())
-    item_image_url = f"https://www.tools4albion.com/renderer/item/{item_id}.png"
+    
+    # Use the official render service for the image
+    item_image_url = f"https://render.albiononline.com/v1/sprite/{item_id}?quality=1"
     embed.set_thumbnail(url=item_image_url)
-    price_info = "\n".join([f"**{city_price['city']}:** {city_price['price']:,} silver" for city_price in prices])
-    embed.add_field(name="Market Prices", value=price_info, inline=False)
-    embed.set_footer(text="Prices are updated periodically by Tools4Albion.")
+
+    price_info = []
+    # Filter for EU server cities
+    eu_cities = ["Caerleon", "Thetford", "Fort Sterling", "Lymhurst", "Bridgewatch", "Martlock"]
+    for city_price in prices:
+        if city_price.get('city') in eu_cities and city_price.get('sell_price_min') > 0:
+            city = city_price['city']
+            price = city_price['sell_price_min']
+            price_info.append(f"**{city}:** {price:,} silver")
+            
+    if not price_info:
+        return await ctx.send(f"No recent price data found for `{found_name}` in major EU cities.")
+
+    embed.add_field(name="Market Prices (Lowest Sell Order)", value="\n".join(price_info), inline=False)
+    embed.set_footer(text="Data provided by The Albion Online Data Project.")
     await ctx.send(embed=embed)
 
 @bot.command(name='guildinfo')
