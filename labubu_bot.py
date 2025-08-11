@@ -29,6 +29,33 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 db = None # Initialize db as None
 
+# --- API HELPER FUNCTIONS (THIS BLOCK IS NOW CORRECTLY INCLUDED) ---
+API_BASE_URL = 'https://www.tools4albion.com/api/gameinfo'
+
+def search_player(name):
+    response = requests.get(f"{API_BASE_URL}/search?search={name}")
+    if response.status_code == 200 and response.json().get('players'):
+        return response.json()['players'][0]
+    return None
+
+def get_player_events(player_id):
+    response = requests.get(f"{API_BASE_URL}/events/player/{player_id}?limit=10")
+    if response.status_code == 200:
+        return response.json()
+    return []
+
+def search_item(name):
+    response = requests.get(f"{API_BASE_URL}/search?search={name}")
+    if response.status_code == 200 and response.json().get('items'):
+        return response.json()['items'][0]
+    return None
+
+def get_item_prices(item_id):
+    response = requests.get(f"{API_BASE_URL}/prices/{item_id}")
+    if response.status_code == 200:
+        return response.json()
+    return None
+
 # --- BOT EVENTS & TASKS ---
 @bot.event
 async def on_ready():
@@ -55,7 +82,6 @@ async def on_ready():
 
 @tasks.loop(seconds=60)
 async def check_player_events():
-    # FIXED: Changed 'if not db' to 'if db is None'
     if db is None or not KILLBOARD_CHANNEL_ID: return
     channel = bot.get_channel(KILLBOARD_CHANNEL_ID)
     if not channel: return
@@ -85,19 +111,17 @@ async def check_player_events():
 async def before_check_player_events():
     await bot.wait_until_ready()
 
-# --- BOT COMMANDS (Now with added DB connection checks) ---
+# --- BOT COMMANDS ---
 @bot.command(name='register')
 async def register(ctx, *, player_name: str):
-    # FIXED: Changed 'if not db' to 'if db is None'
     if db is None: return await ctx.send("❌ Command failed: The database is not connected.")
     player_data = search_player(player_name)
     if not player_data: return await ctx.send(f"❌ Could not find a player named `{player_name}`.")
     db['registered_players'].update_one({'_id': ctx.author.id}, {'$set': {'player_data': player_data}}, upsert=True)
-    await ctx.send(f"✅ **Success!** `{player_name}` is now being tracked.")
+    await ctx.send(f"✅ **Success!** `{player_data['Name']}` is now being tracked.")
 
 @bot.command(name='unregister')
 async def unregister(ctx):
-    # FIXED: Changed 'if not db' to 'if db is None'
     if db is None: return await ctx.send("❌ Command failed: The database is not connected.")
     result = db['registered_players'].delete_one({'_id': ctx.author.id})
     if result.deleted_count > 0: await ctx.send("✅ **Removed!** You will no longer be tracked.")
