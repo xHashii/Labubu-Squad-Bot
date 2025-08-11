@@ -29,29 +29,39 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 db = None # Initialize db as None
 
-# --- API HELPER FUNCTIONS (THIS BLOCK IS NOW CORRECTLY INCLUDED) ---
-API_BASE_URL = 'https://www.tools4albion.com/api/gameinfo'
+# --- API HELPER FUNCTIONS ---
+# Using the official EU API for primary player/event data
+OFFICIAL_API_BASE_URL = 'https://gameinfo-ams.albiononline.com/api/gameinfo'
+# Using the wrapper API for convenience features (items, prices, images)
+WRAPPER_API_BASE_URL = 'https://www.tools4albion.com/api/gameinfo'
 
 def search_player(name):
-    response = requests.get(f"{API_BASE_URL}/search?search={name}")
+    """Searches for a player on the official EU server API."""
+    response = requests.get(f"{OFFICIAL_API_BASE_URL}/search?q={name}")
     if response.status_code == 200 and response.json().get('players'):
-        return response.json()['players'][0]
+        for player in response.json()['players']:
+            if player.get('Name', '').lower() == name.lower():
+                return player # Return exact match
+        return response.json()['players'][0] # Fallback to first result
     return None
 
 def get_player_events(player_id):
-    response = requests.get(f"{API_BASE_URL}/events/player/{player_id}?limit=10")
+    """Gets recent kill/death events for a player from the official EU server API."""
+    response = requests.get(f"{OFFICIAL_API_BASE_URL}/players/{player_id}/kills")
     if response.status_code == 200:
         return response.json()
     return []
 
 def search_item(name):
-    response = requests.get(f"{API_BASE_URL}/search?search={name}")
+    """Searches for an item using the wrapper API."""
+    response = requests.get(f"{WRAPPER_API_BASE_URL}/search?search={name}")
     if response.status_code == 200 and response.json().get('items'):
         return response.json()['items'][0]
     return None
 
 def get_item_prices(item_id):
-    response = requests.get(f"{API_BASE_URL}/prices/{item_id}")
+    """Gets item prices using the wrapper API."""
+    response = requests.get(f"{WRAPPER_API_BASE_URL}/prices/{item_id}")
     if response.status_code == 200:
         return response.json()
     return None
@@ -99,10 +109,15 @@ async def check_player_events():
                 is_kill = event['Killer']['Id'] == player_id
                 title = f"DEATH: {player_name} was killed!" if not is_kill else f"KILL: {player_name} got a kill!"
                 color = discord.Color.red() if not is_kill else discord.Color.green()
-                kill_image_url = f"https://www.tools4albion.com/renderer/kill/{event['EventId']}.png"
+                
+                # Create the embed using the official data for the description
                 embed = discord.Embed(title=title, description=f"**{event['Killer']['Name']}** defeated **{event['Victim']['Name']}**", color=color)
+                
+                # Set the image using the tools4albion renderer URL
+                kill_image_url = f"https://www.tools4albion.com/renderer/kill/{event_id}.png"
                 embed.set_image(url=kill_image_url)
-                embed.set_footer(text=f"Fame: {event['TotalVictimKillFame']:,}")
+                
+                embed.set_footer(text=f"Fame: {event['TotalVictimKillFame']:,} | Event ID: {event_id}")
                 await channel.send(embed=embed)
                 events_collection.insert_one({'_id': event_id})
         await asyncio.sleep(2)
@@ -116,7 +131,7 @@ async def before_check_player_events():
 async def register(ctx, *, player_name: str):
     if db is None: return await ctx.send("❌ Command failed: The database is not connected.")
     player_data = search_player(player_name)
-    if not player_data: return await ctx.send(f"❌ Could not find a player named `{player_name}`.")
+    if not player_data: return await ctx.send(f"❌ Could not find a player named `{player_name}` on the EU server.")
     db['registered_players'].update_one({'_id': ctx.author.id}, {'$set': {'player_data': player_data}}, upsert=True)
     await ctx.send(f"✅ **Success!** `{player_data['Name']}` is now being tracked.")
 
