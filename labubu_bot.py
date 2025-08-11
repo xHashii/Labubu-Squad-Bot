@@ -30,9 +30,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 db = None # Initialize db as None
 
 # --- API HELPER FUNCTIONS ---
-# Using the official EU API for primary player/event data
 OFFICIAL_API_BASE_URL = 'https://gameinfo-ams.albiononline.com/api/gameinfo'
-# Using the wrapper API for convenience features (items, prices, images)
 WRAPPER_API_BASE_URL = 'https://www.tools4albion.com/api/gameinfo'
 
 def search_player(name):
@@ -41,13 +39,13 @@ def search_player(name):
     if response.status_code == 200 and response.json().get('players'):
         for player in response.json()['players']:
             if player.get('Name', '').lower() == name.lower():
-                return player # Return exact match
-        return response.json()['players'][0] # Fallback to first result
+                return player
+        return response.json()['players'][0]
     return None
 
 def get_player_events(player_id):
     """Gets recent kill/death events for a player from the official EU server API."""
-    response = requests.get(f"{OFFICIAL_API_BASE_URL}/players/{player_id}/kills")
+    response = requests.get(f"{OFFICIAL_API_BASE_URL}/events/player/{player_id}/kills")
     if response.status_code == 200:
         return response.json()
     return []
@@ -106,12 +104,33 @@ async def check_player_events():
         for event in events:
             event_id = str(event['EventId'])
             if events_collection.find_one({'_id': event_id}) is None:
+                # --- NEW: Enhanced Killboard Embed Generation ---
                 is_kill = event['Killer']['Id'] == player_id
                 title = f"DEATH: {player_name} was killed!" if not is_kill else f"KILL: {player_name} got a kill!"
                 color = discord.Color.red() if not is_kill else discord.Color.green()
                 
-                # Create the embed using the official data for the description
-                embed = discord.Embed(title=title, description=f"**{event['Killer']['Name']}** defeated **{event['Victim']['Name']}**", color=color)
+                # Create the URL to the official killboard
+                killboard_url = f"https://albiononline.com/en/killboard/kill/{event_id}"
+                
+                embed = discord.Embed(title=title, url=killboard_url, color=color)
+                
+                # Killer Info
+                killer_guild = event['Killer'].get('GuildName', 'No Guild')
+                killer_alliance = f"[{event['Killer'].get('AllianceName', 'No Alliance')}]"
+                killer_info = f"**{event['Killer']['Name']}**\n{killer_guild}\n{killer_alliance}"
+                
+                # Victim Info
+                victim_guild = event['Victim'].get('GuildName', 'No Guild')
+                victim_alliance = f"[{event['Victim'].get('AllianceName', 'No Alliance')}]"
+                victim_info = f"**{event['Victim']['Name']}**\n{victim_guild}\n{victim_alliance}"
+                
+                embed.add_field(name="Killer", value=killer_info, inline=True)
+                embed.add_field(name="Victim", value=victim_info, inline=True)
+                
+                # Participants Info
+                participants = [p['Name'] for p in event.get('Participants', []) if p['Id'] != event['Killer']['Id']]
+                if participants:
+                    embed.add_field(name="Assisted By", value="\n".join(participants), inline=False)
                 
                 # Set the image using the tools4albion renderer URL
                 kill_image_url = f"https://www.tools4albion.com/renderer/kill/{event_id}.png"
