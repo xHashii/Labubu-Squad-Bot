@@ -53,18 +53,46 @@ def get_player_events(player_id):
         return response.json()
     return []
 
-def search_item_in_db(name):
-    """Searches for an item in our local MongoDB item collection."""
+def parse_item_query(query):
+    """Parses a user's item query to extract tier, enchantment, quality, and base name."""
+    query = query.lower()
+    
+    # Regex to find tier and enchantment (e.g., t4, t8.1, t4.4)
+    tier_match = re.search(r't([4-8])(\.[1-4])?', query)
+    tier, enchantment = (None, 0)
+    if tier_match:
+        tier = int(tier_match.group(1))
+        if tier_match.group(2):
+            enchantment = int(tier_match.group(2)[1:])
+        query = query.replace(tier_match.group(0), "").strip()
+
+    # Regex to find quality
+    quality_map = {"normal": 1, "good": 2, "outstanding": 3, "excellent": 4, "masterpiece": 5}
+    quality_name, quality_num = (None, None)
+    for q_name, q_num in quality_map.items():
+        if q_name in query:
+            quality_name = q_name.capitalize()
+            quality_num = q_num
+            query = query.replace(q_name, "").strip()
+            break
+            
+    return {"base_name": query, "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
+
+def search_base_item_in_db(base_name):
+    """Searches for a base item in our local MongoDB item collection."""
     if db is None: return None
     items_collection = db['items']
-    # Use a case-insensitive regex for an exact match
-    query = {"friendly_name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+    # Use a case-insensitive regex to find an item containing the base name
+    query = {"friendly_name": {"$regex": base_name, "$options": "i"}}
     item = items_collection.find_one(query)
     return item
 
-def get_item_prices(item_unique_name):
-    """Gets item prices using the data project API."""
-    response = requests.get(f"{DATA_API_BASE_URL}/prices/{item_unique_name}")
+def get_item_prices(item_unique_name, quality=None):
+    """Gets item prices using the data project API, with optional quality filter."""
+    params = {}
+    if quality:
+        params['qualities'] = quality
+    response = requests.get(f"{DATA_API_BASE_URL}/prices/{item_unique_name}", params=params)
     if response.status_code == 200:
         return response.json()
     return None
@@ -75,20 +103,38 @@ def format_time_ago(timestamp_str):
     last_update = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
     now = datetime.now(timezone.utc)
     delta = now - last_update
-    
     hours, remainder = divmod(int(delta.total_seconds()), 3600)
     minutes, _ = divmod(remainder, 60)
-    
-    if hours > 0:
-        return f"{hours}h {minutes}m ago"
-    return f"{minutes}m ago"
+    return f"{hours}h {minutes}m ago" if hours > 0 else f"{minutes}m ago"
+
+async def _initialize_item_database():
+    """(Internal) Checks if the item database is populated and fills it if not."""
+    if db is None: return
+    items_collection = db['items']
+    if items_collection.count_documents({}) < 1000:
+        print("Item database is empty. Populating now...")
+        try:
+            response = requests.get(ITEMS_JSON_URL)
+            response.raise_for_status()
+            all_items = response.json()
+            items_to_insert = []
+            for item in all_items:
+                friendly_name = item.get('LocalizedNames', {}).get('EN-US')
+                unique_name = item.get('UniqueName')
+                if friendly_name and unique_name:
+                    items_to_insert.append({'_id': unique_name, 'unique_name': unique_name, 'friendly_name': friendly_name})
+            if items_to_insert:
+                items_collection.delete_many({})
+                items_collection.insert_many(items_to_insert)
+                print(f"SUCCESS: Item database populated with {len(items_to_insert)} items.")
+        except Exception as e:
+            print(f"FATAL: Could not populate item database: {e}")
 
 # --- BOT EVENTS & TASKS ---
 @bot.event
 async def on_ready():
     """This runs AFTER the bot has successfully logged in."""
     print(f"--- BOT IS ONLINE AS {bot.user} ---")
-    
     global db
     try:
         print("Attempting to connect to database...")
@@ -96,20 +142,19 @@ async def on_ready():
         mongo_client.admin.command('ismaster')
         db = mongo_client['labubu_bot_db']
         print("SUCCESS: Database connection established.")
-        
+        await _initialize_item_database()
         if KILLBOARD_CHANNEL_ID:
             check_player_events.start()
             print("Killboard task started.")
         else:
             print("WARNING: Killboard task not started (KILLBOARD_CHANNEL_ID not set).")
-            
     except Exception as e:
         print(f"FATAL: Database connection failed: {e}")
         db = None
 
 @tasks.loop(seconds=60)
 async def check_player_events():
-    # ... (This entire task is unchanged and works correctly)
+    # ... (This task is unchanged)
     if db is None or not KILLBOARD_CHANNEL_ID: return
     channel = bot.get_channel(KILLBOARD_CHANNEL_ID)
     if not channel: return
@@ -140,27 +185,46 @@ async def before_check_player_events():
 
 # --- BOT COMMANDS ---
 @bot.command(name='price')
-async def price(ctx, *, item_name: str):
-    await ctx.send(f"🔍 Searching for `{item_name}` in the local database...")
-    item_data = search_item_in_db(item_name)
+async def price(ctx, *, query: str):
+    await ctx.send(f"🔍 Processing query for `{query}`...")
     
-    if not item_data:
-        return await ctx.send(f"❌ Could not find an item named `{item_name}`. Please ensure it's spelled correctly or run `!updateitems` if you're the owner.")
+    parsed_query = parse_item_query(query)
+    base_name = parsed_query['base_name']
+    
+    base_item_data = search_base_item_in_db(base_name)
+    if not base_item_data:
+        return await ctx.send(f"❌ Could not find a base item matching `{base_name}`.")
         
-    item_id = item_data['unique_name']
-    found_name = item_data.get('friendly_name', item_id)
-    
-    prices = get_item_prices(item_id)
-    if not prices:
-        return await ctx.send(f"Could not fetch price data for `{found_name}`.")
+    # Construct the final item ID
+    base_unique_name = base_item_data['unique_name']
+    if parsed_query['tier']:
+        # Replace the tier in the base name (e.g., T4_... -> T8_...)
+        final_unique_name = re.sub(r'T[4-8]', f"T{parsed_query['tier']}", base_unique_name)
+    else:
+        final_unique_name = base_unique_name
+        
+    if parsed_query['enchantment'] > 0:
+        final_unique_name += f"@{parsed_query['enchantment']}"
 
-    # --- NEW: Rebuilt Embed ---
-    embed = discord.Embed(title=f"{found_name} / Europe Server 🌍", color=discord.Color.dark_blue())
-    item_image_url = f"https://render.albiononline.com/v1/sprite/{item_id}?quality=1"
+    prices = get_item_prices(final_unique_name, quality=parsed_query['quality_num'])
+    if not prices:
+        return await ctx.send(f"Could not fetch price data for `{final_unique_name}`.")
+
+    # Construct the title
+    title_parts = []
+    if parsed_query['tier']:
+        enchant_str = f".{parsed_query['enchantment']}" if parsed_query['enchantment'] > 0 else ""
+        title_parts.append(f"T{parsed_query['tier']}{enchant_str}")
+    if parsed_query['quality_name']:
+        title_parts.append(parsed_query['quality_name'])
+    title_parts.append(base_item_data['friendly_name'])
+    
+    embed_title = f"{' '.join(title_parts)} / Europe Server 🌍"
+    embed = discord.Embed(title=embed_title, color=discord.Color.dark_blue())
+    item_image_url = f"https://render.albiononline.com/v1/sprite/{final_unique_name}?quality=1"
     embed.set_thumbnail(url=item_image_url)
 
-    sell_orders = []
-    buy_orders = []
+    sell_orders, buy_orders = [], []
     quality_map = {1: "Normal", 2: "Good", 3: "Outstanding", 4: "Excellent", 5: "Masterpiece"}
     eu_cities = ["Caerleon", "Thetford", "Fort Sterling", "Lymhurst", "Bridgewatch", "Martlock", "Brecilien"]
 
@@ -168,64 +232,16 @@ async def price(ctx, *, item_name: str):
         city = city_price.get('city')
         if city in eu_cities:
             quality = quality_map.get(city_price.get('quality'), "N/A")
-            # Sell Orders
             if city_price.get('sell_price_min') > 0:
-                price = city_price['sell_price_min']
-                age = format_time_ago(city_price.get('sell_price_min_date'))
-                sell_orders.append(f"**{city} ({quality}):** {price:,} - *{age}*")
-            # Buy Orders
+                sell_orders.append(f"**{city} ({quality}):** {city_price['sell_price_min']:,} - *{format_time_ago(city_price.get('sell_price_min_date'))}*")
             if city_price.get('buy_price_max') > 0:
-                price = city_price['buy_price_max']
-                age = format_time_ago(city_price.get('buy_price_max_date'))
-                buy_orders.append(f"**{city} ({quality}):** {price:,} - *{age}*")
+                buy_orders.append(f"**{city} ({quality}):** {city_price['buy_price_max']:,} - *{format_time_ago(city_price.get('buy_price_max_date'))}*")
 
-    if sell_orders:
-        embed.add_field(name="Sell Orders", value="\n".join(sell_orders), inline=False)
-    if buy_orders:
-        embed.add_field(name="Buy Orders", value="\n".join(buy_orders), inline=False)
-
-    if not sell_orders and not buy_orders:
-        return await ctx.send(f"No recent price data found for `{found_name}` in major EU cities.")
-
+    if sell_orders: embed.add_field(name="Sell Orders", value="\n".join(sell_orders), inline=False)
+    if buy_orders: embed.add_field(name="Buy Orders", value="\n".join(buy_orders), inline=False)
+    if not sell_orders and not buy_orders: return await ctx.send(f"No recent price data found for `{final_unique_name}`.")
     embed.set_footer(text="Data provided by The Albion Online Data Project.")
     await ctx.send(embed=embed)
-
-@bot.command(name='updateitems', help='(Owner Only) Updates the local item database.')
-@commands.is_owner()
-async def updateitems(ctx):
-    if db is None: return await ctx.send("❌ Cannot update items: Database is not connected.")
-    
-    await ctx.send("Starting item database update... This may take a few minutes. Please wait.")
-    print("Item update process started by owner.")
-    
-    try:
-        response = requests.get(ITEMS_JSON_URL)
-        response.raise_for_status() # Will raise an error for bad status codes
-        all_items = response.json()
-        
-        items_collection = db['items']
-        update_count = 0
-        
-        for item in all_items:
-            # We only care about items with an English name
-            friendly_name = item.get('LocalizedNames', {}).get('EN-US')
-            unique_name = item.get('UniqueName')
-            
-            if friendly_name and unique_name:
-                # Use update_one with upsert to insert new items or update existing ones
-                items_collection.update_one(
-                    {'_id': unique_name},
-                    {'$set': {'unique_name': unique_name, 'friendly_name': friendly_name}},
-                    upsert=True
-                )
-                update_count += 1
-        
-        await ctx.send(f"✅ **Success!** Item database has been updated. Processed {update_count} items.")
-        print(f"Item update process finished. Processed {update_count} items.")
-        
-    except Exception as e:
-        await ctx.send(f"❌ **Error!** An exception occurred during the item update: {e}")
-        print(f"Error during item update: {e}")
 
 # ... (register, unregister, and guildinfo commands are unchanged) ...
 @bot.command(name='register')
@@ -234,7 +250,7 @@ async def register(ctx, *, player_name: str):
     player_data = search_player(player_name)
     if not player_data: return await ctx.send(f"❌ Could not find a player named `{player_name}` on the EU server.")
     db['registered_players'].update_one({'_id': ctx.author.id}, {'$set': {'player_data': player_data}}, upsert=True)
-    await ctx.send(f"✅ **Success!** `{player_name}` is now being tracked.")
+    await ctx.send(f"✅ **Success!** `{player_data['Name']}` is now being tracked.")
 @bot.command(name='unregister')
 async def unregister(ctx):
     if db is None: return await ctx.send("❌ Command failed: The database is not connected.")
@@ -255,7 +271,7 @@ def run_bot():
     """This function runs in a separate thread and starts the bot."""
     if BOT_TOKEN:
         print("INFO: Bot thread started, attempting to log in...")
-        bot.run(BOT_TKN)
+        bot.run(BOT_TOKEN)
     else:
         print("FATAL: BOT_TOKEN not found in bot thread.")
 
