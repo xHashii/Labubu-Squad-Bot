@@ -52,7 +52,6 @@ def generate_kill_image(event):
     img = Image.new('RGBA', (ITEM_SIZE * 6 + PADDING * 5, ITEM_SIZE * 2 + PADDING * 3 + 40), BG_COLOR)
     draw = ImageDraw.Draw(img)
     
-    # FIXED: Load the font from the local assets folder for reliability
     try:
         font = ImageFont.truetype("./assets/Roboto-Regular.ttf", 15)
     except IOError:
@@ -120,18 +119,16 @@ def parse_item_query(query):
             quality_name, quality_num = q_name.capitalize(), q_num
             query = query.replace(q_name, "").strip()
             break
-    return {"base_name": query, "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
+    return {"search_term": query, "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
 
-def search_base_item_in_db(base_name):
+def search_item_in_db(search_term):
+    """FIXED: Uses a flexible 'contains' search to find items."""
     if db is None: return None
     items_collection = db['items']
-    query = {
-        "$or": [
-            {"friendly_name": {"$regex": f"^{re.escape(base_name)}$", "$options": "i"}},
-            {"base_friendly_name": {"$regex": f"^{re.escape(base_name)}$", "$options": "i"}}
-        ]
-    }
-    return items_collection.find_one(query)
+    # This regex finds any item that CONTAINS the search term, case-insensitively.
+    query = {"friendly_name": {"$regex": search_term, "$options": "i"}}
+    item = items_collection.find_one(query)
+    return item
 
 def get_item_prices(item_unique_name, quality=None):
     params = {'qualities': quality} if quality else {}
@@ -149,6 +146,7 @@ def format_time_ago(timestamp_str):
     return f"{hours}h {minutes}m ago" if hours > 0 else f"{minutes}m ago"
 
 async def _initialize_item_database():
+    """Populates the database with item names for searching."""
     if db is None: return
     items_collection = db['items']
     if items_collection.count_documents({}) < 1000:
@@ -158,17 +156,11 @@ async def _initialize_item_database():
             response.raise_for_status()
             all_items = response.json()
             items_to_insert = []
-            prefixes_to_strip = ["Elder's ", "Grandmaster's ", "Master's ", "Expert's ", "Adept's ", "Journeyman's ", "Novice's "]
             for item in all_items:
                 friendly_name = item.get('LocalizedNames', {}).get('EN-US')
                 unique_name = item.get('UniqueName')
                 if friendly_name and unique_name:
-                    base_friendly_name = friendly_name
-                    for prefix in prefixes_to_strip:
-                        if base_friendly_name.startswith(prefix):
-                            base_friendly_name = base_friendly_name[len(prefix):]
-                            break
-                    items_to_insert.append({'_id': unique_name, 'unique_name': unique_name, 'friendly_name': friendly_name, 'base_friendly_name': base_friendly_name})
+                    items_to_insert.append({'_id': unique_name, 'unique_name': unique_name, 'friendly_name': friendly_name})
             if items_to_insert:
                 items_collection.delete_many({})
                 items_collection.insert_many(items_to_insert)
@@ -222,8 +214,6 @@ async def check_player_events():
                 if participants: desc += f"\n**Participants :** {', '.join(participants)}"
                 embed.description = desc
                 
-                # FIXED: Removed the faulty thumbnail URL
-                
                 image_buffer = generate_kill_image(event)
                 file = discord.File(fp=image_buffer, filename="kill.png")
                 embed.set_image(url="attachment://kill.png")
@@ -245,15 +235,22 @@ async def before_check_player_events():
 async def price(ctx, *, query: str):
     await ctx.send(f"🔍 Processing query for `{query}`...")
     parsed_query = parse_item_query(query)
-    base_item_data = search_base_item_in_db(parsed_query['base_name'])
-    if not base_item_data:
-        return await ctx.send(f"❌ Could not find a base item matching `{parsed_query['base_name']}`.")
+    # Use the parsed search term for the database lookup
+    item_data = search_item_in_db(parsed_query['search_term'])
     
-    base_unique_name = base_item_data['unique_name']
+    if not item_data:
+        return await ctx.send(f"❌ Could not find an item containing `{parsed_query['search_term']}`.")
+    
+    # Now we have a base item, let's construct the final ID
+    base_unique_name = item_data['unique_name']
     tier_to_use = parsed_query['tier']
-    if tier_to_use is None and re.search(r'T[1-8]', base_unique_name):
-        tier_to_use = 4
     
+    # If the user didn't specify a tier, extract it from the found item's ID
+    if tier_to_use is None:
+        base_tier_match = re.search(r'T([1-8])', base_unique_name)
+        if base_tier_match:
+            tier_to_use = int(base_tier_match.group(1))
+
     if tier_to_use:
         final_unique_name = re.sub(r'T[1-8]', f"T{tier_to_use}", base_unique_name)
     else:
@@ -270,7 +267,7 @@ async def price(ctx, *, query: str):
         enchant_str = f".{parsed_query['enchantment']}" if parsed_query['enchantment'] > 0 else ""
         title_parts.append(f"T{tier_to_use}{enchant_str}")
     if parsed_query['quality_name']: title_parts.append(parsed_query['quality_name'])
-    title_parts.append(base_item_data['friendly_name'])
+    title_parts.append(item_data['friendly_name'])
     
     embed = discord.Embed(title=f"{' '.join(title_parts)} / Europe Server 🌍", color=discord.Color.dark_blue())
     embed.set_thumbnail(url=f"{ITEM_RENDER_URL}/{final_unique_name}?quality=1")
