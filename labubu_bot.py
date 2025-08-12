@@ -122,16 +122,11 @@ def parse_item_query(query):
     return {"search_term": query, "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
 
 def search_item_in_db(search_term):
-    """FIXED: Uses a flexible 'contains' search to find items."""
+    """Uses a flexible 'contains' search to find items."""
     if db is None: return None
     items_collection = db['items']
-    # This new query is much more flexible. It checks for an exact match on either the full name OR the base name.
-    query = {
-        "$or": [
-            {"friendly_name": {"$regex": f"^{re.escape(search_term)}$", "$options": "i"}},
-            {"base_friendly_name": {"$regex": f"^{re.escape(search_term)}$", "$options": "i"}}
-        ]
-    }
+    # This regex finds any item that CONTAINS the search term, case-insensitively.
+    query = {"friendly_name": {"$regex": search_term, "$options": "i"}}
     item = items_collection.find_one(query)
     return item
 
@@ -151,7 +146,7 @@ def format_time_ago(timestamp_str):
     return f"{hours}h {minutes}m ago" if hours > 0 else f"{minutes}m ago"
 
 async def _initialize_item_database():
-    """FIXED: Populates the database with a searchable 'base_friendly_name'."""
+    """Populates the database with item names for searching."""
     if db is None: return
     items_collection = db['items']
     if items_collection.count_documents({}) < 1000:
@@ -160,27 +155,12 @@ async def _initialize_item_database():
             response = requests.get(ITEMS_JSON_URL)
             response.raise_for_status()
             all_items = response.json()
-            
             items_to_insert = []
-            prefixes_to_strip = ["Elder's ", "Grandmaster's ", "Master's ", "Expert's ", "Adept's ", "Journeyman's ", "Novice's "]
-            
             for item in all_items:
                 friendly_name = item.get('LocalizedNames', {}).get('EN-US')
                 unique_name = item.get('UniqueName')
                 if friendly_name and unique_name:
-                    base_friendly_name = friendly_name
-                    for prefix in prefixes_to_strip:
-                        if base_friendly_name.startswith(prefix):
-                            base_friendly_name = base_friendly_name[len(prefix):]
-                            break
-                    
-                    items_to_insert.append({
-                        '_id': unique_name,
-                        'unique_name': unique_name,
-                        'friendly_name': friendly_name,
-                        'base_friendly_name': base_friendly_name
-                    })
-            
+                    items_to_insert.append({'_id': unique_name, 'unique_name': unique_name, 'friendly_name': friendly_name})
             if items_to_insert:
                 items_collection.delete_many({})
                 items_collection.insert_many(items_to_insert)
@@ -255,11 +235,12 @@ async def before_check_player_events():
 async def price(ctx, *, query: str):
     await ctx.send(f"🔍 Processing query for `{query}`...")
     parsed_query = parse_item_query(query)
-    # Use the parsed search term for the database lookup
-    item_data = search_base_item_in_db(parsed_query['search_term'])
+    
+    # FIXED: Corrected the function call from 'search_base_item_in_db' to 'search_item_in_db'
+    item_data = search_item_in_db(parsed_query['search_term'])
     
     if not item_data:
-        return await ctx.send(f"❌ Could not find a base item matching `{parsed_query['search_term']}`.")
+        return await ctx.send(f"❌ Could not find an item containing `{parsed_query['search_term']}`.")
     
     base_unique_name = item_data['unique_name']
     tier_to_use = parsed_query['tier']
@@ -285,7 +266,6 @@ async def price(ctx, *, query: str):
         enchant_str = f".{parsed_query['enchantment']}" if parsed_query['enchantment'] > 0 else ""
         title_parts.append(f"T{tier_to_use}{enchant_str}")
     if parsed_query['quality_name']: title_parts.append(parsed_query['quality_name'])
-    # Use the full friendly name for the title, not the base name
     title_parts.append(item_data['friendly_name'])
     
     embed = discord.Embed(title=f"{' '.join(title_parts)} / Europe Server 🌍", color=discord.Color.dark_blue())
