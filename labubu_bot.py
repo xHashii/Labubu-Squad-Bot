@@ -35,24 +35,21 @@ db = None # Initialize db as None
 
 # --- API HELPER FUNCTIONS ---
 OFFICIAL_API_BASE_URL = 'https://gameinfo-ams.albiononline.com/api/gameinfo'
-DATA_API_BASE_URL = 'https://www.albion-online-data.com/api/v2/stats'
+# FIXED: Corrected to the Europe-specific data project API endpoint
+DATA_API_BASE_URL = 'https://europe.albion-online-data.com/api/v2/stats'
 ITEMS_JSON_URL = 'https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json'
 ITEM_RENDER_URL = 'https://render.albiononline.com/v1/sprite'
 
 # --- IMAGE GENERATION ---
 def generate_kill_image(event):
     """Generates a kill image from scratch using official item sprites."""
-    # Define layout constants
     BG_COLOR = (47, 49, 54, 255)
     TEXT_COLOR = (220, 221, 222)
     FAME_COLOR = (255, 170, 56)
     ITEM_SIZE = 90
     PADDING = 10
-    
-    # Define gear slots in the order they appear visually
     slots = ["Head", "Armor", "Shoes", "Cape", "MainHand", "OffHand"]
     
-    # Create a blank canvas
     img = Image.new('RGBA', (ITEM_SIZE * 6 + PADDING * 5, ITEM_SIZE * 2 + PADDING * 3 + 40), BG_COLOR)
     draw = ImageDraw.Draw(img)
     
@@ -61,12 +58,9 @@ def generate_kill_image(event):
     except IOError:
         font = ImageFont.load_default()
 
-    # Draw killer's and victim's gear
     for i, player_type in enumerate(['Killer', 'Victim']):
         player = event[player_type]
         y_offset = i * (ITEM_SIZE + PADDING)
-        
-        # Draw player name and IP
         ip = f"{player.get('AverageItemPower', 0):.0f} IP"
         draw.text((PADDING, y_offset + 5), player['Name'], font=font, fill=TEXT_COLOR)
         draw.text((PADDING, y_offset + 25), ip, font=font, fill=TEXT_COLOR)
@@ -83,13 +77,11 @@ def generate_kill_image(event):
                         item_img = item_img.resize((ITEM_SIZE, ITEM_SIZE))
                         img.paste(item_img, (j * (ITEM_SIZE + PADDING), y_offset + 40), item_img)
                 except Exception:
-                    pass # Skip if image fails to load
+                    pass
 
-    # Draw fame icon and value
     fame = event['TotalVictimKillFame']
     draw.text((PADDING, ITEM_SIZE * 2 + PADDING * 2 + 10), f"Fame: {fame:,}", font=font, fill=FAME_COLOR)
 
-    # Save image to a bytes buffer
     buffer = BytesIO()
     img.save(buffer, format='PNG')
     buffer.seek(0)
@@ -212,7 +204,6 @@ async def check_player_events():
                 
                 embed.set_thumbnail(url="https://assets.albiononline.com/assets/images/killboard/kill__event.png")
                 
-                # Generate and attach the new kill image
                 image_buffer = generate_kill_image(event)
                 file = discord.File(fp=image_buffer, filename="kill.png")
                 embed.set_image(url="attachment://kill.png")
