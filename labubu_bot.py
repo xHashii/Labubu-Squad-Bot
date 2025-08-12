@@ -41,7 +41,7 @@ ITEM_RENDER_URL = 'https://render.albiononline.com/v1/sprite'
 
 # --- IMAGE GENERATION ---
 def generate_kill_image(event):
-    """Generates a kill image from scratch using official item sprites."""
+    """Generates a kill image from scratch using official item sprites and a local font."""
     BG_COLOR = (47, 49, 54, 255)
     TEXT_COLOR = (220, 221, 222)
     FAME_COLOR = (255, 170, 56)
@@ -52,9 +52,11 @@ def generate_kill_image(event):
     img = Image.new('RGBA', (ITEM_SIZE * 6 + PADDING * 5, ITEM_SIZE * 2 + PADDING * 3 + 40), BG_COLOR)
     draw = ImageDraw.Draw(img)
     
+    # FIXED: Load the font from the local assets folder for reliability
     try:
-        font = ImageFont.truetype("arial.ttf", 15)
+        font = ImageFont.truetype("./assets/Roboto-Regular.ttf", 15)
     except IOError:
+        print("WARNING: Could not load Roboto-Regular.ttf. Falling back to default font.")
         font = ImageFont.load_default()
 
     for i, player_type in enumerate(['Killer', 'Victim']):
@@ -77,7 +79,8 @@ def generate_kill_image(event):
                         item_img = Image.open(BytesIO(response.content)).convert("RGBA")
                         item_img = item_img.resize((ITEM_SIZE, ITEM_SIZE))
                         img.paste(item_img, (j * (ITEM_SIZE + PADDING), y_offset + 40), item_img)
-                except Exception:
+                except Exception as e:
+                    print(f"Warning: Failed to render item {item_id}. Error: {e}")
                     pass
 
     fame = event['TotalVictimKillFame']
@@ -120,13 +123,15 @@ def parse_item_query(query):
     return {"base_name": query, "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
 
 def search_base_item_in_db(base_name):
-    """FIXED: Searches for a base item using the new 'base_friendly_name' field."""
     if db is None: return None
     items_collection = db['items']
-    # Use a case-insensitive regex for an EXACT match on the base name.
-    query = {"base_friendly_name": {"$regex": f"^{re.escape(base_name)}$", "$options": "i"}}
-    item = items_collection.find_one(query)
-    return item
+    query = {
+        "$or": [
+            {"friendly_name": {"$regex": f"^{re.escape(base_name)}$", "$options": "i"}},
+            {"base_friendly_name": {"$regex": f"^{re.escape(base_name)}$", "$options": "i"}}
+        ]
+    }
+    return items_collection.find_one(query)
 
 def get_item_prices(item_unique_name, quality=None):
     params = {'qualities': quality} if quality else {}
@@ -144,7 +149,6 @@ def format_time_ago(timestamp_str):
     return f"{hours}h {minutes}m ago" if hours > 0 else f"{minutes}m ago"
 
 async def _initialize_item_database():
-    """FIXED: Populates the database with a searchable 'base_friendly_name'."""
     if db is None: return
     items_collection = db['items']
     if items_collection.count_documents({}) < 1000:
@@ -153,10 +157,8 @@ async def _initialize_item_database():
             response = requests.get(ITEMS_JSON_URL)
             response.raise_for_status()
             all_items = response.json()
-            
             items_to_insert = []
             prefixes_to_strip = ["Elder's ", "Grandmaster's ", "Master's ", "Expert's ", "Adept's ", "Journeyman's ", "Novice's "]
-            
             for item in all_items:
                 friendly_name = item.get('LocalizedNames', {}).get('EN-US')
                 unique_name = item.get('UniqueName')
@@ -166,14 +168,7 @@ async def _initialize_item_database():
                         if base_friendly_name.startswith(prefix):
                             base_friendly_name = base_friendly_name[len(prefix):]
                             break
-                    
-                    items_to_insert.append({
-                        '_id': unique_name,
-                        'unique_name': unique_name,
-                        'friendly_name': friendly_name,
-                        'base_friendly_name': base_friendly_name # The new searchable field
-                    })
-            
+                    items_to_insert.append({'_id': unique_name, 'unique_name': unique_name, 'friendly_name': friendly_name, 'base_friendly_name': base_friendly_name})
             if items_to_insert:
                 items_collection.delete_many({})
                 items_collection.insert_many(items_to_insert)
@@ -227,7 +222,7 @@ async def check_player_events():
                 if participants: desc += f"\n**Participants :** {', '.join(participants)}"
                 embed.description = desc
                 
-                embed.set_thumbnail(url="https://assets.albiononline.com/assets/images/killboard/kill__event.png")
+                # FIXED: Removed the faulty thumbnail URL
                 
                 image_buffer = generate_kill_image(event)
                 file = discord.File(fp=image_buffer, filename="kill.png")
@@ -255,10 +250,15 @@ async def price(ctx, *, query: str):
         return await ctx.send(f"❌ Could not find a base item matching `{parsed_query['base_name']}`.")
     
     base_unique_name = base_item_data['unique_name']
-    # Use the tier from the query, or default to T4 if not specified
-    tier_to_use = parsed_query['tier'] if parsed_query['tier'] is not None else 4
-    final_unique_name = re.sub(r'T[1-8]', f"T{tier_to_use}", base_unique_name)
+    tier_to_use = parsed_query['tier']
+    if tier_to_use is None and re.search(r'T[1-8]', base_unique_name):
+        tier_to_use = 4
     
+    if tier_to_use:
+        final_unique_name = re.sub(r'T[1-8]', f"T{tier_to_use}", base_unique_name)
+    else:
+        final_unique_name = base_unique_name
+        
     if parsed_query['enchantment'] > 0:
         final_unique_name += f"@{parsed_query['enchantment']}"
 
@@ -266,8 +266,9 @@ async def price(ctx, *, query: str):
     if not prices: return await ctx.send(f"Could not fetch price data for `{final_unique_name}`.")
 
     title_parts = []
-    enchant_str = f".{parsed_query['enchantment']}" if parsed_query['enchantment'] > 0 else ""
-    title_parts.append(f"T{tier_to_use}{enchant_str}")
+    if tier_to_use:
+        enchant_str = f".{parsed_query['enchantment']}" if parsed_query['enchantment'] > 0 else ""
+        title_parts.append(f"T{tier_to_use}{enchant_str}")
     if parsed_query['quality_name']: title_parts.append(parsed_query['quality_name'])
     title_parts.append(base_item_data['friendly_name'])
     
