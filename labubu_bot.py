@@ -105,8 +105,8 @@ def get_player_events(player_id):
     return []
 
 def normalize_and_parse_query(query):
-    """NEW: The core of the new search system. Normalizes user input for searching."""
-    query = query.lower().replace("'", "") # Convert to lowercase and remove apostrophes
+    """FIXED: The core of the new search system. Normalizes user input for searching."""
+    query = query.lower().replace("'", "")
     
     tier_match = re.search(r't([1-8])(\.[1-4])?', query)
     tier, enchantment = (None, 0)
@@ -123,9 +123,11 @@ def normalize_and_parse_query(query):
             query = query.replace(q_name, "").strip()
             break
             
-    # Strip all known prefixes from the remaining search term
+    # FIXED: The prefix list is now normalized just like the query, fixing the core bug.
     prefixes_to_strip = ["elder's ", "grandmaster's ", "master's ", "expert's ", "adept's ", "journeyman's ", "novice's "]
-    for prefix in prefixes_to_strip:
+    normalized_prefixes = [p.replace("'", "") for p in prefixes_to_strip]
+    
+    for prefix in normalized_prefixes:
         if query.startswith(prefix):
             query = query[len(prefix):]
             break
@@ -133,10 +135,9 @@ def normalize_and_parse_query(query):
     return {"search_key": query.strip(), "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
 
 def search_item_in_db(search_key):
-    """NEW: Performs a direct, exact match search on the pre-processed 'search_key' field."""
+    """Performs a direct, exact match search on the pre-processed 'search_key' field."""
     if db is None: return None
     items_collection = db['items']
-    # This is now a direct, fast, and exact match. No more unreliable regex.
     item = items_collection.find_one({"search_key": search_key})
     return item
 
@@ -156,7 +157,7 @@ def format_time_ago(timestamp_str):
     return f"{hours}h {minutes}m ago" if hours > 0 else f"{minutes}m ago"
 
 async def _initialize_item_database():
-    """NEW: Populates the database with a clean, searchable 'search_key'."""
+    """Populates the database with a clean, searchable 'search_key'."""
     if db is None: return
     items_collection = db['items']
     if items_collection.count_documents({}) < 1000:
@@ -173,7 +174,6 @@ async def _initialize_item_database():
                 friendly_name = item.get('LocalizedNames', {}).get('EN-US')
                 unique_name = item.get('UniqueName')
                 if friendly_name and unique_name:
-                    # Create the clean search key
                     search_key = friendly_name.lower().replace("'", "")
                     for prefix in prefixes_to_strip:
                         if search_key.startswith(prefix.replace("'", "")):
@@ -184,13 +184,12 @@ async def _initialize_item_database():
                         '_id': unique_name,
                         'unique_name': unique_name,
                         'friendly_name': friendly_name,
-                        'search_key': search_key.strip() # The new, clean key
+                        'search_key': search_key.strip()
                     })
             
             if items_to_insert:
                 items_collection.delete_many({})
                 items_collection.insert_many(items_to_insert)
-                # Create an index on the search_key for performance
                 items_collection.create_index("search_key")
                 print(f"SUCCESS: Item database populated with {len(items_to_insert)} items.")
         except Exception as e:
