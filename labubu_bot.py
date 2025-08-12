@@ -104,14 +104,17 @@ def get_player_events(player_id):
     if response.status_code == 200: return response.json()
     return []
 
-def parse_item_query(query):
-    query = query.lower()
+def normalize_and_parse_query(query):
+    """NEW: The core of the new search system. Normalizes user input for searching."""
+    query = query.lower().replace("'", "") # Convert to lowercase and remove apostrophes
+    
     tier_match = re.search(r't([1-8])(\.[1-4])?', query)
     tier, enchantment = (None, 0)
     if tier_match:
         tier = int(tier_match.group(1))
         if tier_match.group(2): enchantment = int(tier_match.group(2)[1:])
         query = query.replace(tier_match.group(0), "").strip()
+        
     quality_map = {"normal": 1, "good": 2, "outstanding": 3, "excellent": 4, "masterpiece": 5}
     quality_name, quality_num = (None, None)
     for q_name, q_num in quality_map.items():
@@ -119,15 +122,22 @@ def parse_item_query(query):
             quality_name, quality_num = q_name.capitalize(), q_num
             query = query.replace(q_name, "").strip()
             break
-    return {"search_term": query, "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
+            
+    # Strip all known prefixes from the remaining search term
+    prefixes_to_strip = ["elder's ", "grandmaster's ", "master's ", "expert's ", "adept's ", "journeyman's ", "novice's "]
+    for prefix in prefixes_to_strip:
+        if query.startswith(prefix):
+            query = query[len(prefix):]
+            break
+            
+    return {"search_key": query.strip(), "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
 
-def search_item_in_db(search_term):
-    """Uses a flexible 'contains' search to find items."""
+def search_item_in_db(search_key):
+    """NEW: Performs a direct, exact match search on the pre-processed 'search_key' field."""
     if db is None: return None
     items_collection = db['items']
-    # This regex finds any item that CONTAINS the search term, case-insensitively.
-    query = {"friendly_name": {"$regex": search_term, "$options": "i"}}
-    item = items_collection.find_one(query)
+    # This is now a direct, fast, and exact match. No more unreliable regex.
+    item = items_collection.find_one({"search_key": search_key})
     return item
 
 def get_item_prices(item_unique_name, quality=None):
@@ -146,7 +156,7 @@ def format_time_ago(timestamp_str):
     return f"{hours}h {minutes}m ago" if hours > 0 else f"{minutes}m ago"
 
 async def _initialize_item_database():
-    """Populates the database with item names for searching."""
+    """NEW: Populates the database with a clean, searchable 'search_key'."""
     if db is None: return
     items_collection = db['items']
     if items_collection.count_documents({}) < 1000:
@@ -155,15 +165,33 @@ async def _initialize_item_database():
             response = requests.get(ITEMS_JSON_URL)
             response.raise_for_status()
             all_items = response.json()
+            
             items_to_insert = []
+            prefixes_to_strip = ["Elder's ", "Grandmaster's ", "Master's ", "Expert's ", "Adept's ", "Journeyman's ", "Novice's "]
+            
             for item in all_items:
                 friendly_name = item.get('LocalizedNames', {}).get('EN-US')
                 unique_name = item.get('UniqueName')
                 if friendly_name and unique_name:
-                    items_to_insert.append({'_id': unique_name, 'unique_name': unique_name, 'friendly_name': friendly_name})
+                    # Create the clean search key
+                    search_key = friendly_name.lower().replace("'", "")
+                    for prefix in prefixes_to_strip:
+                        if search_key.startswith(prefix.replace("'", "")):
+                            search_key = search_key[len(prefix.replace("'", "")):]
+                            break
+                    
+                    items_to_insert.append({
+                        '_id': unique_name,
+                        'unique_name': unique_name,
+                        'friendly_name': friendly_name,
+                        'search_key': search_key.strip() # The new, clean key
+                    })
+            
             if items_to_insert:
                 items_collection.delete_many({})
                 items_collection.insert_many(items_to_insert)
+                # Create an index on the search_key for performance
+                items_collection.create_index("search_key")
                 print(f"SUCCESS: Item database populated with {len(items_to_insert)} items.")
         except Exception as e:
             print(f"FATAL: Could not populate item database: {e}")
@@ -234,13 +262,12 @@ async def before_check_player_events():
 @bot.command(name='price')
 async def price(ctx, *, query: str):
     await ctx.send(f"🔍 Processing query for `{query}`...")
-    parsed_query = parse_item_query(query)
+    parsed_query = normalize_and_parse_query(query)
     
-    # FIXED: Corrected the function call from 'search_base_item_in_db' to 'search_item_in_db'
-    item_data = search_item_in_db(parsed_query['search_term'])
+    item_data = search_item_in_db(parsed_query['search_key'])
     
     if not item_data:
-        return await ctx.send(f"❌ Could not find an item containing `{parsed_query['search_term']}`.")
+        return await ctx.send(f"❌ Could not find an item matching `{parsed_query['search_key']}`.")
     
     base_unique_name = item_data['unique_name']
     tier_to_use = parsed_query['tier']
