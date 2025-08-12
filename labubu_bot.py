@@ -35,7 +35,6 @@ db = None # Initialize db as None
 
 # --- API HELPER FUNCTIONS ---
 OFFICIAL_API_BASE_URL = 'https://gameinfo-ams.albiononline.com/api/gameinfo'
-# FIXED: Corrected to the Europe-specific data project API endpoint
 DATA_API_BASE_URL = 'https://europe.albion-online-data.com/api/v2/stats'
 ITEMS_JSON_URL = 'https://raw.githubusercontent.com/ao-data/ao-bin-dumps/master/formatted/items.json'
 ITEM_RENDER_URL = 'https://render.albiononline.com/v1/sprite'
@@ -68,7 +67,9 @@ def generate_kill_image(event):
         for j, slot in enumerate(slots):
             item = player.get('Equipment', {}).get(slot)
             if item:
-                item_id = f"{item['Type']}@{item.get('Enchantment', 0)}"
+                item_id = f"{item['Type']}"
+                if item.get('Enchantment', 0) > 0:
+                    item_id += f"@{item.get('Enchantment')}"
                 item_url = f"{ITEM_RENDER_URL}/{item_id}?quality={item.get('Quality', 1)}"
                 try:
                     response = requests.get(item_url, stream=True)
@@ -103,7 +104,7 @@ def get_player_events(player_id):
 
 def parse_item_query(query):
     query = query.lower()
-    tier_match = re.search(r't([4-8])(\.[1-4])?', query)
+    tier_match = re.search(r't([1-8])(\.[1-4])?', query)
     tier, enchantment = (None, 0)
     if tier_match:
         tier = int(tier_match.group(1))
@@ -119,10 +120,13 @@ def parse_item_query(query):
     return {"base_name": query, "tier": tier, "enchantment": enchantment, "quality_name": quality_name, "quality_num": quality_num}
 
 def search_base_item_in_db(base_name):
+    """FIXED: Searches for a base item using the new 'base_friendly_name' field."""
     if db is None: return None
     items_collection = db['items']
-    query = {"friendly_name": {"$regex": base_name, "$options": "i"}}
-    return items_collection.find_one(query)
+    # Use a case-insensitive regex for an EXACT match on the base name.
+    query = {"base_friendly_name": {"$regex": f"^{re.escape(base_name)}$", "$options": "i"}}
+    item = items_collection.find_one(query)
+    return item
 
 def get_item_prices(item_unique_name, quality=None):
     params = {'qualities': quality} if quality else {}
@@ -140,6 +144,7 @@ def format_time_ago(timestamp_str):
     return f"{hours}h {minutes}m ago" if hours > 0 else f"{minutes}m ago"
 
 async def _initialize_item_database():
+    """FIXED: Populates the database with a searchable 'base_friendly_name'."""
     if db is None: return
     items_collection = db['items']
     if items_collection.count_documents({}) < 1000:
@@ -148,7 +153,27 @@ async def _initialize_item_database():
             response = requests.get(ITEMS_JSON_URL)
             response.raise_for_status()
             all_items = response.json()
-            items_to_insert = [{'_id': item['UniqueName'], 'unique_name': item['UniqueName'], 'friendly_name': item.get('LocalizedNames', {}).get('EN-US')} for item in all_items if item.get('LocalizedNames', {}).get('EN-US')]
+            
+            items_to_insert = []
+            prefixes_to_strip = ["Elder's ", "Grandmaster's ", "Master's ", "Expert's ", "Adept's ", "Journeyman's ", "Novice's "]
+            
+            for item in all_items:
+                friendly_name = item.get('LocalizedNames', {}).get('EN-US')
+                unique_name = item.get('UniqueName')
+                if friendly_name and unique_name:
+                    base_friendly_name = friendly_name
+                    for prefix in prefixes_to_strip:
+                        if base_friendly_name.startswith(prefix):
+                            base_friendly_name = base_friendly_name[len(prefix):]
+                            break
+                    
+                    items_to_insert.append({
+                        '_id': unique_name,
+                        'unique_name': unique_name,
+                        'friendly_name': friendly_name,
+                        'base_friendly_name': base_friendly_name # The new searchable field
+                    })
+            
             if items_to_insert:
                 items_collection.delete_many({})
                 items_collection.insert_many(items_to_insert)
@@ -230,14 +255,19 @@ async def price(ctx, *, query: str):
         return await ctx.send(f"❌ Could not find a base item matching `{parsed_query['base_name']}`.")
     
     base_unique_name = base_item_data['unique_name']
-    final_unique_name = re.sub(r'T[1-8]', f"T{parsed_query['tier']}", base_unique_name) if parsed_query['tier'] else base_unique_name
-    if parsed_query['enchantment'] > 0: final_unique_name += f"@{parsed_query['enchantment']}"
+    # Use the tier from the query, or default to T4 if not specified
+    tier_to_use = parsed_query['tier'] if parsed_query['tier'] is not None else 4
+    final_unique_name = re.sub(r'T[1-8]', f"T{tier_to_use}", base_unique_name)
+    
+    if parsed_query['enchantment'] > 0:
+        final_unique_name += f"@{parsed_query['enchantment']}"
 
     prices = get_item_prices(final_unique_name, quality=parsed_query['quality_num'])
     if not prices: return await ctx.send(f"Could not fetch price data for `{final_unique_name}`.")
 
     title_parts = []
-    if parsed_query['tier']: title_parts.append(f"T{parsed_query['tier']}{f'.{parsed_query["enchantment"]}' if parsed_query['enchantment'] > 0 else ''}")
+    enchant_str = f".{parsed_query['enchantment']}" if parsed_query['enchantment'] > 0 else ""
+    title_parts.append(f"T{tier_to_use}{enchant_str}")
     if parsed_query['quality_name']: title_parts.append(parsed_query['quality_name'])
     title_parts.append(base_item_data['friendly_name'])
     
